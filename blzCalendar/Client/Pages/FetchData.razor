@@ -1,0 +1,142 @@
+﻿@page "/fetchdata"
+@using System.ComponentModel.DataAnnotations
+@using System.Text.Json.Serialization
+@using Microsoft.AspNetCore.Components.WebAssembly.Authentication
+@using Microsoft.Extensions.Logging
+@inject IAccessTokenProvider TokenProvider
+@inject IHttpClientFactory ClientFactory
+@inject IHttpClientFactory HttpClientFactory
+@using Newtonsoft.Json;
+@using blzCalendar.Client.Components
+@using blzCalendar.Shared.Models
+@inject DialogService DialogService
+
+@if (calendarEvents == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <div style="">
+        <RadzenScheduler Style="height:90vh;"
+                     @ref="@scheduler"
+                     SelectedIndex="2" 
+        Data="@calendarEvents" 
+        TItem="CalendarEvent"
+        StartProperty="Start" 
+        EndProperty="End" 
+        TextProperty="Text" 
+        SlotSelect=@OnSlotSelect
+        AppointmentSelect=@OnAppointmentSelect
+        SlotRender=@OnSlotRender
+        >
+
+            <RadzenDayView />
+            <RadzenWeekView />
+            <RadzenMonthView />
+        </RadzenScheduler>
+    </div>
+}
+
+@code {
+
+    private string userDisplayName;
+    RadzenScheduler<CalendarEvent> scheduler = new RadzenScheduler<CalendarEvent>();
+    private List<CalendarEvent> calendarEvents = new List<CalendarEvent>();
+
+    private HttpClient _httpClient;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _httpClient = HttpClientFactory.CreateClient("GraphAPI");
+        try
+        {
+            var dataRequest = await _httpClient.GetAsync("https://graph.microsoft.com/v1.0/me");
+
+            if (dataRequest.IsSuccessStatusCode)
+            {
+                var userData = System.Text.Json.JsonDocument.Parse(await dataRequest.Content.ReadAsStreamAsync());
+                userDisplayName = userData.RootElement.GetProperty("displayName").GetString();
+            }
+
+            var calendarRequest = await _httpClient.GetAsync("https://graph.microsoft.com/v1.0/me/events?$select=subject,body,bodyPreview,organizer,attendees,start,end,location");
+
+            if (calendarRequest.IsSuccessStatusCode)
+            {
+
+                var calendarData = System.Text.Json.JsonDocument.Parse(await calendarRequest.Content.ReadAsStreamAsync());
+                var calendarArray = calendarData.RootElement.GetProperty("value").EnumerateArray();
+
+                foreach (var m in calendarArray)
+                {
+                    var calendarEvent = new CalendarEvent();
+                    //calendarEvent.Subject = m.GetProperty("subject").GetString() ?? "N/A";                   
+                    calendarEvent.Start = m.GetProperty("start").GetProperty("dateTime").GetDateTime();
+                    calendarEvent.End = m.GetProperty("end").GetProperty("dateTime").GetDateTime();
+                    //fixme change this to body.getproperty("content").getString() but returns html content so need to parse when switching over and display somehow
+                    calendarEvent.Text = m.GetProperty("bodyPreview").GetString() ?? "No content exists for this event or there was an error fetching the content";
+                    calendarEvents.Add(calendarEvent);
+                }
+            }
+            scheduler?.Reload();
+        }
+        catch (AccessTokenNotAvailableException ex)
+        {
+            // Tokens are not valid - redirect the user to log in again
+            ex.Redirect();
+        }
+    }
+
+    void OnSlotRender(SchedulerSlotRenderEventArgs args) 
+    {
+        // Highlight today in month view
+        if (args.View.Text == "Month" && args.Start.Date == DateTime.Today)
+        {
+            args.Attributes["style"] = "background: rgba(255,220,40,.2);";
+        }
+
+        // Highlight working hours (9-18)
+        if ((args.View.Text == "Week" || args.View.Text == "Day") && args.Start.Hour > 8 && args.Start.Hour < 18)
+        {
+            args.Attributes["style"] = "background: rgba(255,220,40,.2);";
+        }
+
+    }
+
+
+    async Task OnSlotSelect(SchedulerSlotSelectEventArgs args)
+    {
+
+
+        CalendarEvent data = await DialogService.OpenAsync<AddCalendarEvent>("Add Calendar Event",
+              new Dictionary<string, object>() { { "Start", args.Start }, { "End", args.End } }, 
+              new DialogOptions() { Width = "700px", Height = "530px", Resizable = true, Draggable = true });
+
+        if (data != null)
+        {
+            calendarEvents.Add(data);
+            // Either call the Reload method or reassign the Data property of the Scheduler
+            await scheduler.Reload();
+        }
+    }
+
+    void OnAppointmentRender(SchedulerAppointmentRenderEventArgs<CalendarEvent> args)
+    {
+        // Never call StateHasChanged in AppointmentRender - would lead to infinite loop
+
+        if (args.Data.Text == "Birthday")
+        {
+            args.Attributes["style"] = "background: red";
+        }
+    }
+
+    async Task OnAppointmentSelect(SchedulerAppointmentSelectEventArgs<CalendarEvent> args)
+    {
+        await DialogService.OpenAsync<EditCalendarEvent>("Edit Event",
+        new Dictionary<string, object> { { "CalendarEvent", args.Data } });
+
+        await scheduler.Reload();
+    }
+
+
+}
